@@ -251,6 +251,12 @@ struct TouchContact {
     var deviceSize = NSSize(width: 155, height: 100)
 }
 
+private struct MappedPDFPoint {
+    let page: PDFPage
+    let point: NSPoint
+    let viewLocation: NSPoint
+}
+
 // The content view also receives touches above the toolbar when the cursor leaves the PDF.
 final class TouchRootView: NSView {
     weak var surface: InkSurface?
@@ -329,8 +335,14 @@ final class InkSurface: NSView {
     private var touchScrollSequence = false
     private var regionPage: PDFPage?
     private var writingRect = NSRect.zero
+    // The writing frame lives in the PDF view's overlay coordinate space. It is
+    // intentionally independent of any single PDF page, so it may cross the
+    // page gap in two-column mode.
+    private var writingViewRect = NSRect.zero
     private var padAspect: CGFloat = 1.55
     private var penPosition: NSPoint?
+    private var penPage: PDFPage?
+    private var penViewPosition: NSPoint?
     private var penArmed = false
     private var pressHeld = false
     private var privateDrawing = false
@@ -506,8 +518,8 @@ final class InkSurface: NSView {
         if usingRawPressure { receiveTouches(event); return }
         if mode == .writing, (requiresPress || !event.modifierFlags.contains(.command)), let previous = contacts.first,
            let touch = event.touches(matching: .ended, in: nil).first(where: { previous.identity.isEqual($0.identity) }),
-           let point = mappedPoint(touch.normalizedPosition) {
-            extendStroke(to: point)
+           let mapped = mappedPDFPoint(touch.normalizedPosition) {
+            consumeMappedPoint(mapped)
         }
         receiveTouches(event)
     }
@@ -521,7 +533,10 @@ final class InkSurface: NSView {
             penArmed = false; pressHeld = false; privateDrawing = false; rawPressure = 0
             mode = .idle
             hadMultipleContacts = false
+            touchScrollSequence = false
             penPosition = nil
+            penPage = nil
+            penViewPosition = nil
             return
         }
         if contacts.isEmpty {
@@ -541,12 +556,14 @@ final class InkSurface: NSView {
         }
         switch next.count {
         case 1:
-            guard !hadMultipleContacts, mode != .blocked, let point = mappedPoint(next[0].position) else {
-                finishStroke(); mode = .blocked; penPosition = nil; return
+            guard !hadMultipleContacts, mode != .blocked, let mapped = mappedPDFPoint(next[0].position) else {
+                finishStroke(); mode = .blocked; penPosition = nil; penPage = nil; penViewPosition = nil; return
             }
             if mode != .writing || !sameFingers { finishStroke(); penArmed = false; privateDrawing = false }
             mode = .writing
-            penPosition = point
+            penPosition = mapped.point
+            penPage = mapped.page
+            penViewPosition = mapped.viewLocation
             if previewing, !requiresPress { finishStroke(); privateDrawing = false; return }
             if pressureMode {
                 guard let pressure, pressure.isFinite, pressure >= 0 else {
@@ -563,31 +580,14 @@ final class InkSurface: NSView {
                 guard pressHeld else { return }
                 penArmed = true
             }
-            if page == nil { page = regionPage; strokeStartedAt = ProcessInfo.processInfo.systemUptime }
-            extendStroke(to: point)
+            consumeMappedPoint(mapped)
         case 2:
+            // Native scrollWheel/magnify events own two-finger navigation. Raw
+            // contacts only switch the input state away from handwriting.
             finishStroke(discardGesturePrelude: true)
             penPosition = nil
-            if mode == .pinching, sameFingers {
-                let previousCenter = centroid(contacts)
-                let currentCenter = centroid(next)
-                let movement = NSPoint(x: currentCenter.x - previousCenter.x,
-                                        y: currentCenter.y - previousCenter.y)
-                // A normal two-finger swipe scrolls the PDF. Convert the normalized
-                // trackpad displacement to the visible PDF viewport, just as a
-                // mouse drag would move the scroll view.
-                if hypot(movement.x, movement.y) > 0.001 {
-                    scrollPDF(byNormalized: movement)
-                }
-
-                // Only a meaningful change in finger separation is a pinch. A
-                // parallel two-finger swipe therefore never changes the zoom.
-                let previous = separation(contacts), current = separation(next)
-                let separationDelta = current - previous
-                if previous > 0.015 && abs(separationDelta) > 0.004 {
-                    zoomPDF(by: max(0.5, min(2, current / previous)))
-                }
-            }
+            penPage = nil
+            penViewPosition = nil
             mode = .pinching
         case 3:
             finishStroke(discardGesturePrelude: true)
@@ -612,7 +612,7 @@ final class InkSurface: NSView {
     func resetInput() {
         holdCursor(false)
         finishStroke()
-        contacts = []; mode = .idle; hadMultipleContacts = false; penPosition = nil
+        contacts = []; mode = .idle; hadMultipleContacts = false; penPosition = nil; penPage = nil; penViewPosition = nil
         penArmed = false; pressHeld = false
         privateDrawing = false; rawPressure = 0
         touchScrollSequence = false
@@ -625,10 +625,13 @@ final class InkSurface: NSView {
         privateDrawing = false; rawPressure = 0
         if !contacts.isEmpty { mode = .blocked; hadMultipleContacts = true }
         penPosition = nil
+        penPage = nil
+        penViewPosition = nil
         needsDisplay = true
     }
 
     private var regionViewRect: NSRect? {
+        if !writingViewRect.isEmpty { return writingViewRect }
         guard let pdfView, let regionPage else { return nil }
         return convert(pdfView.convert(writingRect, from: regionPage), from: pdfView)
     }
@@ -653,13 +656,21 @@ final class InkSurface: NSView {
     }
 
     private func resizeRegion() {
-        guard let pdfView, let regionPage else { return }
-        let center = NSPoint(x: writingRect.midX, y: writingRect.midY)
-        let pageBounds = regionPage.bounds(for: .cropBox)
+        guard let pdfView else { return }
+        let center = regionViewRect.map { NSPoint(x: $0.midX, y: $0.midY) } ?? NSPoint(x: bounds.midX, y: bounds.midY)
         let screenWidth = min(440 * regionScale, max(40, bounds.width - 24), max(40, bounds.height - 60) * padAspect)
+        let size = NSSize(width: screenWidth, height: screenWidth / padAspect)
+        if !writingViewRect.isEmpty {
+            writingViewRect = NSRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
+            clampRegion()
+            needsDisplay = true
+            return
+        }
+        guard let regionPage else { return }
+        let pageBounds = regionPage.bounds(for: .cropBox)
         let pageWidth = screenWidth / max(pdfView.scaleFactor, 0.1) / (regionPage.rotation % 180 == 0 ? 1 : padAspect)
         let width = min(pageWidth, max(1, pageBounds.width - 4), max(1, pageBounds.height - 4) * pageAspect)
-        writingRect = NSRect(x: center.x - width / 2, y: center.y - width / pageAspect / 2, width: width, height: width / pageAspect)
+        writingRect = NSRect(x: writingRect.midX - width / 2, y: writingRect.midY - width / pageAspect / 2, width: width, height: width / pageAspect)
         clampRegion()
         needsDisplay = true
     }
@@ -667,14 +678,23 @@ final class InkSurface: NSView {
     private func placeRegion(at location: NSPoint) {
         guard let pdfView else { return }
         let position = pdfView.convert(location, from: self)
-        guard let target = pdfView.page(for: position, nearest: true) else { return }
-        let center = pdfView.convert(position, to: target)
-        regionPage = target
-        writingRect = NSRect(origin: center, size: .zero)
+        regionPage = pdfView.page(for: position, nearest: true)
+        // Keep a non-empty seed rectangle so resizeRegion() preserves the
+        // mouse-selected screen center while switching to the page-independent
+        // overlay used by two-column mode.
+        writingViewRect = NSRect(x: location.x, y: location.y, width: 1, height: 1)
         resizeRegion()
     }
 
     private func clampRegion() {
+        if !writingViewRect.isEmpty {
+            let limit = bounds.insetBy(dx: 2, dy: 2)
+            writingViewRect.size.width = min(writingViewRect.width, limit.width)
+            writingViewRect.size.height = min(writingViewRect.height, limit.height)
+            writingViewRect.origin.x = max(limit.minX, min(limit.maxX - writingViewRect.width, writingViewRect.minX))
+            writingViewRect.origin.y = max(limit.minY, min(limit.maxY - writingViewRect.height, writingViewRect.minY))
+            return
+        }
         guard let regionPage else { return }
         let limit = regionPage.bounds(for: .cropBox).insetBy(dx: 2, dy: 2)
         writingRect.size.width = min(writingRect.width, limit.width)
@@ -684,6 +704,13 @@ final class InkSurface: NSView {
     }
 
     private func moveRegion(by delta: NSPoint) {
+        if !writingViewRect.isEmpty {
+            writingViewRect.origin.x += delta.x
+            writingViewRect.origin.y += delta.y
+            clampRegion()
+            needsDisplay = true
+            return
+        }
         guard let pdfView, let regionPage, let rect = regionViewRect else { return }
         let origin = pdfView.convert(pdfView.convert(NSPoint(x: rect.midX, y: rect.midY), from: self), to: regionPage)
         let moved = pdfView.convert(pdfView.convert(NSPoint(x: rect.midX + delta.x, y: rect.midY + delta.y), from: self), to: regionPage)
@@ -693,43 +720,31 @@ final class InkSurface: NSView {
         needsDisplay = true
     }
 
-    private func mappedPoint(_ normalized: NSPoint) -> NSPoint? {
-        guard let pdfView, let regionPage, let rect = regionViewRect else { return nil }
-        // Both NSTouch and this non-flipped view have their origin at the lower left.
-        let location = NSPoint(x: rect.minX + max(0, min(1, normalized.x)) * rect.width, y: rect.minY + max(0, min(1, normalized.y)) * rect.height)
-        return pdfView.convert(pdfView.convert(location, from: self), to: regionPage)
+    private func mappedPDFPoint(_ normalized: NSPoint) -> MappedPDFPoint? {
+        guard let pdfView, let rect = regionViewRect else { return nil }
+        let location = NSPoint(x: rect.minX + max(0, min(1, normalized.x)) * rect.width,
+                               y: rect.minY + max(0, min(1, normalized.y)) * rect.height)
+        let pdfLocation = pdfView.convert(location, from: self)
+        guard let page = pdfView.page(for: pdfLocation, nearest: true) else { return nil }
+        return MappedPDFPoint(page: page, point: pdfView.convert(pdfLocation, to: page), viewLocation: location)
     }
 
-    private func scrollPDF(byNormalized movement: NSPoint) {
-        guard let pdfView,
-              let clip = pdfView.documentView?.enclosingScrollView?.contentView else { return }
-        let viewport = clip.bounds.size
-        // The trackpad's normalized coordinates are in a lower-left origin. Keep
-        // the same direction as a direct mouse drag: swiping up reveals content
-        // farther down the document, while swiping right moves the page right.
-        let dx = movement.x * max(viewport.width, bounds.width)
-        let dy = movement.y * max(viewport.height, bounds.height)
-        var proposed = clip.bounds
-        proposed.origin.x -= dx
-        proposed.origin.y += clip.isFlipped ? -dy : dy
-        clip.scroll(to: clip.constrainBoundsRect(proposed).origin)
-        clip.enclosingScrollView?.reflectScrolledClipView(clip)
-        viewportChanged()
+    private func mappedPoint(_ normalized: NSPoint) -> NSPoint? {
+        mappedPDFPoint(normalized)?.point
     }
 
     private func zoomPDF(by factor: CGFloat) {
         guard let pdfView else { return }
         let scroll = pdfView.documentView?.enclosingScrollView
         let clip = scroll?.contentView
-        let center = NSPoint(x: writingRect.midX, y: writingRect.midY)
-        let oldAnchor = regionPage.map { pdfView.convert(center, from: $0) }
-        let oldLocation = oldAnchor.flatMap { pdfView.documentView?.convert($0, from: pdfView) }
+        let anchor = regionViewRect.map { NSPoint(x: $0.midX, y: $0.midY) } ?? NSPoint(x: bounds.midX, y: bounds.midY)
+        let oldLocation = pdfView.documentView?.convert(pdfView.convert(anchor, from: self), from: pdfView)
         pdfView.autoScales = false
         pdfView.scaleFactor = min(pdfView.maxScaleFactor, max(pdfView.minScaleFactor, pdfView.scaleFactor * factor))
         pdfView.layoutDocumentView()
         pdfScaleChanged()
-        if let regionPage, let oldLocation, let clip, let documentView = pdfView.documentView {
-            let location = documentView.convert(pdfView.convert(center, from: regionPage), from: pdfView)
+        if let oldLocation, let clip, let documentView = pdfView.documentView {
+            let location = documentView.convert(pdfView.convert(anchor, from: self), from: pdfView)
             var proposed = clip.bounds
             proposed.origin.x += location.x - oldLocation.x
             proposed.origin.y += location.y - oldLocation.y
@@ -737,6 +752,18 @@ final class InkSurface: NSView {
             scroll?.reflectScrolledClipView(clip)
         }
         needsDisplay = true
+    }
+
+    private func consumeMappedPoint(_ mapped: MappedPDFPoint) {
+        penPosition = mapped.point
+        penPage = mapped.page
+        penViewPosition = mapped.viewLocation
+        if page !== mapped.page {
+            if page != nil { finishStroke() }
+            page = mapped.page
+            strokeStartedAt = ProcessInfo.processInfo.systemUptime
+        }
+        extendStroke(to: mapped.point)
     }
 
     private func extendStroke(to point: NSPoint) {
@@ -797,8 +824,7 @@ final class InkSurface: NSView {
             inkColor.setStroke()
             path.stroke()
         }
-        if let regionPage, let penPosition {
-            let location = convert(pdfView.convert(penPosition, from: regionPage), from: pdfView)
+        if let location = penViewPosition {
             let drawing = page != nil
             let radius: CGFloat = drawing ? 3 : 6
             let tip = NSBezierPath(ovalIn: NSRect(x: location.x - radius, y: location.y - radius, width: radius * 2, height: radius * 2))
@@ -809,16 +835,28 @@ final class InkSurface: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        // Raw contacts own multi-finger gestures; their scroll/momentum events must not also move the PDF.
-        if event.phase.contains(.began) { touchScrollSequence = !contacts.isEmpty }
-        if contacts.count >= 2 || (touchScrollSequence && (event.phase != [] || event.momentumPhase != [])) { return }
+        if event.phase.contains(.began), !contacts.isEmpty { touchScrollSequence = true }
+        let nativeTouchSequence = contacts.count >= 2 || touchScrollSequence
+        if nativeTouchSequence {
+            if let scroll = pdfView?.documentView?.enclosingScrollView {
+                scroll.scrollWheel(with: event)
+            }
+            if event.phase.contains(.ended) || event.momentumPhase.contains(.ended) {
+                touchScrollSequence = false
+            }
+            viewportChanged()
+            return
+        }
         interruptForNavigation()
         if event.modifierFlags.contains(.command) { zoomPDF(by: exp(event.scrollingDeltaY * 0.01)); return }
         if let scroll = pdfView?.documentView?.enclosingScrollView { scroll.scrollWheel(with: event) }
         needsDisplay = true
     }
 
-    override func magnify(with event: NSEvent) {} // Raw two-finger separation already performs the zoom.
+    override func magnify(with event: NSEvent) {
+        guard contacts.count >= 2 || touchScrollSequence else { return }
+        zoomPDF(by: max(0.5, min(2, 1 + event.magnification)))
+    }
 
     override func flagsChanged(with event: NSEvent) {
         if mode == .writing { processContacts(contacts, previewing: event.modifierFlags.contains(.command), pressure: pressureMode ? rawPressure : nil) }

@@ -23,7 +23,7 @@ A lightweight macOS PDF reader and editor that turns your trackpad into a handwr
 | 单指轻触、加力 | 预览、落笔；抬手结束当前笔画 |
 | 勾选“减力收笔” | 减力结束笔画并继续定位，再次加力开始新笔画 |
 | 取消“减力收笔” | 加力起笔后持续书写，直到抬手 |
-| 双指上下/左右滑动 | 滚动或平移 PDF 阅读视口 |
+| 双指上下/左右滑动 | 使用 macOS 原生滚动惯性滚动或平移 PDF 阅读视口 |
 | 双指捏合 | 缩放 PDF |
 | 双指滑动并改变指距 | 同时滚动和缩放 PDF |
 | 三指移动 | 移动书写框 |
@@ -31,6 +31,8 @@ A lightweight macOS PDF reader and editor that turns your trackpad into a handwr
 | 鼠标滚轮 / 中键或右键拖动 | 滚动 / 平移 PDF |
 | Command + 滚轮 | 缩放 PDF |
 | Esc | 返回阅读模式 |
+
+双栏布局下书写框是独立的连续屏幕区域，可以跨过两页之间的页缝；触控板映射不按页边硬切。
 
 触摸期间固定系统箭头，包括外接鼠标；全部抬手或应用失焦后恢复。多指退回单指时，需要全部抬手再继续书写，避免误落笔。系统三指手势可能与应用手势冲突。
 
