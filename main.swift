@@ -252,8 +252,8 @@ struct TouchContact {
 }
 
 private struct MappedPDFPoint {
-    let page: PDFPage
-    let point: NSPoint
+    let page: PDFPage?
+    let point: NSPoint?
     let viewLocation: NSPoint
 }
 
@@ -725,8 +725,14 @@ final class InkSurface: NSView {
         let location = NSPoint(x: rect.minX + max(0, min(1, normalized.x)) * rect.width,
                                y: rect.minY + max(0, min(1, normalized.y)) * rect.height)
         let pdfLocation = pdfView.convert(location, from: self)
-        guard let page = pdfView.page(for: pdfLocation, nearest: true) else { return nil }
-        return MappedPDFPoint(page: page, point: pdfView.convert(pdfLocation, to: page), viewLocation: location)
+        guard let page = pdfView.page(for: pdfLocation, nearest: true) else {
+            return MappedPDFPoint(page: nil, point: nil, viewLocation: location)
+        }
+        let pagePoint = pdfView.convert(pdfLocation, to: page)
+        let pageBounds = page.bounds(for: .cropBox).insetBy(dx: -0.01, dy: -0.01)
+        return pageBounds.contains(pagePoint)
+            ? MappedPDFPoint(page: page, point: pagePoint, viewLocation: location)
+            : MappedPDFPoint(page: nil, point: nil, viewLocation: location)
     }
 
     private func mappedPoint(_ normalized: NSPoint) -> NSPoint? {
@@ -758,12 +764,16 @@ final class InkSurface: NSView {
         penPosition = mapped.point
         penPage = mapped.page
         penViewPosition = mapped.viewLocation
-        if page !== mapped.page {
+        guard let mappedPage = mapped.page, let mappedPoint = mapped.point else {
             if page != nil { finishStroke() }
-            page = mapped.page
+            return
+        }
+        if page !== mappedPage {
+            if page != nil { finishStroke() }
+            page = mappedPage
             strokeStartedAt = ProcessInfo.processInfo.systemUptime
         }
-        extendStroke(to: mapped.point)
+        extendStroke(to: mappedPoint)
     }
 
     private func extendStroke(to point: NSPoint) {
@@ -816,7 +826,7 @@ final class InkSurface: NSView {
             outline.setLineDash([5, 4], count: 2, phase: 0)
             NSColor.systemBlue.withAlphaComponent(0.7).setStroke()
             outline.stroke()
-            ("触控板书写区域" as NSString).draw(at: NSPoint(x: rect.minX + 6, y: rect.maxY + 5), withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemBlue])
+            ("触控板书写覆盖层" as NSString).draw(at: NSPoint(x: rect.minX + 6, y: rect.maxY + 5), withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemBlue])
         }
         if let page, !points.isEmpty, !erasing {
             let path = inkPath(inkGeometry(points, smoothing: smoothInk).map { convert(pdfView.convert($0, from: page), from: pdfView) })
@@ -838,9 +848,7 @@ final class InkSurface: NSView {
         if event.phase.contains(.began), !contacts.isEmpty { touchScrollSequence = true }
         let nativeTouchSequence = contacts.count >= 2 || touchScrollSequence
         if nativeTouchSequence {
-            if let scroll = pdfView?.documentView?.enclosingScrollView {
-                scroll.scrollWheel(with: event)
-            }
+            pdfView?.scrollWheel(with: event)
             if event.phase.contains(.ended) || event.momentumPhase.contains(.ended) {
                 touchScrollSequence = false
             }
@@ -849,7 +857,7 @@ final class InkSurface: NSView {
         }
         interruptForNavigation()
         if event.modifierFlags.contains(.command) { zoomPDF(by: exp(event.scrollingDeltaY * 0.01)); return }
-        if let scroll = pdfView?.documentView?.enclosingScrollView { scroll.scrollWheel(with: event) }
+        pdfView?.scrollWheel(with: event)
         needsDisplay = true
     }
 
