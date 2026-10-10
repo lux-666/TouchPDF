@@ -569,8 +569,24 @@ final class InkSurface: NSView {
             finishStroke(discardGesturePrelude: true)
             penPosition = nil
             if mode == .pinching, sameFingers {
+                let previousCenter = centroid(contacts)
+                let currentCenter = centroid(next)
+                let movement = NSPoint(x: currentCenter.x - previousCenter.x,
+                                        y: currentCenter.y - previousCenter.y)
+                // A normal two-finger swipe scrolls the PDF. Convert the normalized
+                // trackpad displacement to the visible PDF viewport, just as a
+                // mouse drag would move the scroll view.
+                if hypot(movement.x, movement.y) > 0.001 {
+                    scrollPDF(byNormalized: movement)
+                }
+
+                // Only a meaningful change in finger separation is a pinch. A
+                // parallel two-finger swipe therefore never changes the zoom.
                 let previous = separation(contacts), current = separation(next)
-                if previous > 0.015 && current > 0.015 { zoomPDF(by: current / previous) }
+                let separationDelta = current - previous
+                if previous > 0.015 && abs(separationDelta) > 0.004 {
+                    zoomPDF(by: max(0.5, min(2, current / previous)))
+                }
             }
             mode = .pinching
         case 3:
@@ -682,6 +698,23 @@ final class InkSurface: NSView {
         // Both NSTouch and this non-flipped view have their origin at the lower left.
         let location = NSPoint(x: rect.minX + max(0, min(1, normalized.x)) * rect.width, y: rect.minY + max(0, min(1, normalized.y)) * rect.height)
         return pdfView.convert(pdfView.convert(location, from: self), to: regionPage)
+    }
+
+    private func scrollPDF(byNormalized movement: NSPoint) {
+        guard let pdfView,
+              let clip = pdfView.documentView?.enclosingScrollView?.contentView else { return }
+        let viewport = clip.bounds.size
+        // The trackpad's normalized coordinates are in a lower-left origin. Keep
+        // the same direction as a direct mouse drag: swiping up reveals content
+        // farther down the document, while swiping right moves the page right.
+        let dx = movement.x * max(viewport.width, bounds.width)
+        let dy = movement.y * max(viewport.height, bounds.height)
+        var proposed = clip.bounds
+        proposed.origin.x -= dx
+        proposed.origin.y += clip.isFlipped ? -dy : dy
+        clip.scroll(to: clip.constrainBoundsRect(proposed).origin)
+        clip.enclosingScrollView?.reflectScrolledClipView(clip)
+        viewportChanged()
     }
 
     private func zoomPDF(by factor: CGFloat) {
@@ -801,6 +834,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
     let surface = InkSurface(frame: .zero)
     private let annotationButton = NSButton(title: "触控板批注", target: nil, action: nil)
     private let toolControl = NSSegmentedControl(labels: ["笔", "橡皮"], trackingMode: .selectOne, target: nil, action: nil)
+    private let layoutControl = NSSegmentedControl(labels: ["单栏", "双栏"], trackingMode: .selectOne, target: nil, action: nil)
     private let regionSlider = NSSlider(value: 100, minValue: 40, maxValue: 300, target: nil, action: nil)
     private let regionSizeLabel = NSTextField(labelWithString: "100%")
     private let inkModeControl = NSSegmentedControl(labels: ["轻触即写", "轻压绘画"], trackingMode: .selectOne, target: nil, action: nil)
@@ -853,7 +887,12 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
         toolControl.selectedSegment = 0
         toolControl.target = self
         toolControl.action = #selector(selectTool)
-        let bar = NSStackView(views: [button("打开", #selector(openPDF)), button("新建空白", #selector(newBlank)), button("保存", #selector(savePDF)), annotationButton, toolControl, button("撤销", #selector(undoStroke)), NSTextField(labelWithString: "PDF"), button("−", #selector(zoomOut)), button("＋", #selector(zoomIn)), button("适合宽度", #selector(fitPage))])
+        layoutControl.selectedSegment = 0
+        layoutControl.target = self
+        layoutControl.action = #selector(selectLayout)
+        layoutControl.setAccessibilityLabel("PDF 阅读布局")
+        layoutControl.toolTip = "单栏或双栏连续阅读；只改变页面排版，不改变书写框映射。"
+        let bar = NSStackView(views: [button("打开", #selector(openPDF)), button("新建空白", #selector(newBlank)), button("保存", #selector(savePDF)), annotationButton, toolControl, button("撤销", #selector(undoStroke)), NSTextField(labelWithString: "PDF"), layoutControl, button("−", #selector(zoomOut)), button("＋", #selector(zoomIn)), button("适合宽度", #selector(fitPage))])
         bar.orientation = .horizontal
         bar.spacing = 8
         bar.alignment = .centerY
@@ -963,6 +1002,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
         annotationButton.state = surface.enabled ? .on : .off
         annotationButton.title = surface.enabled ? "批注：开" : "触控板批注"
         toolControl.isEnabled = surface.enabled
+        layoutControl.selectedSegment = pdfView.displayMode == .twoUpContinuous || pdfView.displayMode == .twoUp ? 1 : 0
+        layoutControl.isEnabled = true
         inkModeControl.isEnabled = surface.enabled
         inkModeControl.selectedSegment = surface.pressureMode ? 1 : 0
         pressureSlider.isEnabled = surface.enabled && surface.pressureMode
@@ -975,7 +1016,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
         regionSlider.doubleValue = Double(surface.regionScale * 100)
         regionSizeLabel.stringValue = "\(Int(surface.regionScale * 100))%"
         let releaseHint = surface.releaseToPreview ? "减力收笔" : "抬手收笔"
-        status.stringValue = surface.enabled ? (surface.cursorHoldFailed ? "未能固定系统指针，请全部抬手后重试。" : (surface.inputNotice ?? (surface.pressureMode ? "轻触定位 · 加力落笔 · \(releaseHint) · 双指缩放 · 三指移框 · 指针固定" : "单指写 · 双指缩放 PDF · 三指移框 · 按住 ⌘ 预览 · 触控时指针固定"))) : "阅读模式 · 开启“触控板批注”即可勾画"
+        status.stringValue = surface.enabled ? (surface.cursorHoldFailed ? "未能固定系统指针，请全部抬手后重试。" : (surface.inputNotice ?? (surface.pressureMode ? "轻触定位 · 加力落笔 · \(releaseHint) · 双指滚动/捏合缩放 · 三指移框 · 指针固定" : "单指写 · 双指滚动/捏合缩放 PDF · 三指移框 · 按住 ⌘ 预览 · 触控时指针固定"))) : "阅读模式 · 开启“触控板批注”即可勾画"
         if let page = pdfView.currentPage, let document = pdfView.document {
             pageLabel.stringValue = "\(document.index(for: page) + 1) / \(document.pageCount) · \(Int(pdfView.scaleFactor * 100))%"
         }
@@ -985,6 +1026,15 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
     @objc func savePDF() { surface.finishStroke(); reader?.save(nil) }
     @objc func toggleAnnotation() { surface.enabled.toggle(); window?.makeFirstResponder(surface.enabled ? surface : pdfView) }
     @objc func selectTool() { surface.finishStroke(); surface.erasing = toolControl.selectedSegment == 1 }
+    @objc func selectLayout() {
+        surface.interruptForNavigation()
+        pdfView.displayMode = layoutControl.selectedSegment == 1 ? .twoUpContinuous : .singlePageContinuous
+        pdfView.layoutDocumentView()
+        pdfView.autoScales = false
+        pdfView.scaleFactor = min(pdfView.maxScaleFactor, max(pdfView.minScaleFactor, pdfView.scaleFactorForSizeToFit))
+        surface.viewportChanged()
+        updateControls()
+    }
     @objc func selectInkMode() { surface.pressureMode = inkModeControl.selectedSegment == 1 }
     @objc func changePressureThreshold() {
         surface.pressureThreshold = Float(pressureSlider.doubleValue)

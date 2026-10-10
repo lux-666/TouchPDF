@@ -6,7 +6,7 @@ A lightweight macOS PDF reader and editor that turns your trackpad into a handwr
 
 ## 下载
 
-在 [Releases](https://github.com/lux-666/TouchPDF/releases) 下载 `TouchPDF-0.6.1-macos-arm64.zip`，解压后将 `TouchPDF.app` 放到“应用程序”目录。
+在 [Releases](https://github.com/lux-666/TouchPDF/releases) 下载最新的 `TouchPDF-*-macos-arm64.zip`，解压后将 `TouchPDF.app` 放到“应用程序”目录。
 
 当前版本支持 **Apple Silicon（M 系列）及 macOS 13 或更新版本**。轻压绘画需要兼容的触控板，力度信号会随设备、手指姿势而变化，可用滑块调整门槛；不支持该输入时自动回退到“轻触即写”。Intel 构建尚未验证。
 
@@ -23,7 +23,9 @@ A lightweight macOS PDF reader and editor that turns your trackpad into a handwr
 | 单指轻触、加力 | 预览、落笔；抬手结束当前笔画 |
 | 勾选“减力收笔” | 减力结束笔画并继续定位，再次加力开始新笔画 |
 | 取消“减力收笔” | 加力起笔后持续书写，直到抬手 |
+| 双指上下/左右滑动 | 滚动或平移 PDF 阅读视口 |
 | 双指捏合 | 缩放 PDF |
+| 双指滑动并改变指距 | 同时滚动和缩放 PDF |
 | 三指移动 | 移动书写框 |
 | 书写框大小 40–300% | 独立调整映射区域，受页面和当前视窗尺寸限制 |
 | 鼠标滚轮 / 中键或右键拖动 | 滚动 / 平移 PDF |
