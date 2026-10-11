@@ -1,0 +1,12 @@
+.DS_Store
+.build/
+dist/
+dist-*/
+/archive/
+/work/
+/outputs/
+*.app/
+*.zip
+*.tar.gz
+*.pdf
+*.log
