@@ -1,8 +1,0 @@
-.DS_Store
-.build/
-dist/
-*.pdf
-*.csv
-*.log
-*.zip
-*.tar.gz

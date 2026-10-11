@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 task_root="${0:A:h}"
-task_app="$task_root/release/TouchPDF/dist/TouchPDF.app"
+task_app="$task_root/dist/TouchPDF.app"
 if [[ ! -x "$task_app/Contents/MacOS/TouchPDF" ]]; then
   print -u2 "找不到稳定版应用：$task_app"
   exit 1

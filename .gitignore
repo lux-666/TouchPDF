@@ -1,9 +1,8 @@
 .DS_Store
 .build/
-dist/
+/dist/
 dist-*/
 /archive/
-/work/
 /outputs/
 *.app/
 *.zip

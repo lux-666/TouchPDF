@@ -3,7 +3,7 @@ import PDFKit
 import UniformTypeIdentifiers
 
 // Compiled into the executable: replacing an app bundle cannot relabel a running process.
-let touchPDFBuild = "0.6.8 (15)"
+let touchPDFBuild = "0.6.9 (16)"
 
 let pdfType = "com.adobe.pdf"
 let defaultInkColor = NSColor(calibratedRed: 0.16, green: 0.37, blue: 0.70, alpha: 1)
@@ -1298,8 +1298,17 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
 }
 
 final class TouchDocumentController: NSDocumentController {
+    private(set) var pendingDocumentOpens = 0
     override func documentClass(forType typeName: String) -> AnyClass? { TouchPDFDocument.self }
     override var defaultType: String? { pdfType }
+    override func openDocument(withContentsOf url: URL, display: Bool,
+                               completionHandler: @escaping (NSDocument?, Bool, Error?) -> Void) {
+        pendingDocumentOpens += 1
+        super.openDocument(withContentsOf: url, display: display) { document, alreadyOpen, error in
+            self.pendingDocumentOpens -= 1
+            completionHandler(document, alreadyOpen, error)
+        }
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -1369,7 +1378,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitCurrent(sender)
     }
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !resolvingInstances }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // An open panel can be the last window while NSDocumentController is
+        // still reading a PDF. Closing that panel must not terminate the app.
+        !resolvingInstances && startupPanel == nil &&
+            (NSDocumentController.shared as? TouchDocumentController)?.pendingDocumentOpens == 0
+    }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !resolvingInstances, !flag, NSDocumentController.shared.documents.isEmpty { chooseStartingDocument() }
         return true
@@ -1391,17 +1405,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.isAccessoryViewDisclosed = true
         startupPanel = panel
         panel.begin { [weak self] response in
-            self?.startupPanel = nil
+            guard let self else { return }
             if response == .OK, let url = panel.url {
+                // Retain the startup guard until the document window exists.
                 NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
-                    if let error { NSApplication.shared.presentError(error) }
+                    if let error {
+                        NSApplication.shared.presentError(error)
+                        self.startupPanel = nil
+                        if NSDocumentController.shared.documents.isEmpty { self.chooseStartingDocument() }
+                    } else {
+                        self.startupPanel = nil
+                    }
                 }
             } else {
                 // The blank-canvas button also cancels this panel, then creates
                 // a document synchronously. Check on the next turn so only an
                 // actual Cancel with no open documents exits the application.
                 DispatchQueue.main.async {
-                    if NSDocumentController.shared.documents.isEmpty { self?.quitCurrent(nil) }
+                    self.startupPanel = nil
+                    if NSDocumentController.shared.documents.isEmpty { self.quitCurrent(nil) }
                 }
             }
         }

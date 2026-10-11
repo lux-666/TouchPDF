@@ -4,6 +4,26 @@ A lightweight macOS PDF reader and editor that turns your trackpad into a handwr
 
 一个轻量的 macOS PDF 阅读与批注应用：触控板轻触定位、加力落笔，无需按下左键；手指位置绝对映射到独立书写框，抬手换位后可以自然地继续写公式。
 
+## 工作区
+
+当前工作区根目录就是 Git 仓库。目录与入口：
+
+| 路径 | 内容 |
+| --- | --- |
+| `src/` | Swift 源码与触控板 C 桥接 |
+| `resources/Info.plist` | 应用版本、文件类型与 bundle 配置 |
+| `build.sh` / `package.sh` | 构建与打包，均从项目根目录运行 |
+| `dist/` | 当前应用、ZIP 与校验文件，不进入 Git |
+| `docs/releases/` | 各版本变更记录 |
+| `docs/testing.md` | 发布前验证步骤，包含启动打开 PDF 回归 |
+| `outputs/` | 两份用户笔记，保留原内容，不进入 Git |
+| `archive/` | 旧发布包、研究源码、旧缓存与整理前清单，不进入 Git |
+| `release/TouchPDF/dist` | 指向根目录 `dist/` 的兼容链接，原应用路径仍可用 |
+
+双击 `启动 TouchPDF 稳定版.command` 启动当前构建。0.6.9 修复 0.6.8 从启动选择框打开 PDF 时意外退出的问题。关闭文件选择框与真正关闭最后一个文档现在分开处理。
+
+工作区整理前的源码已建立独立快照提交。旧的空仓库元数据保存在 `archive/previous-empty-git/`；文件搬移清单与 SHA-256 清单也在 `archive/`。保留原 GitHub origin 地址，但本次只提交本地历史。
+
 ## 下载
 
 在 [Releases](https://github.com/lux-666/TouchPDF/releases) 下载最新的 `TouchPDF-*-macos-arm64.zip`，解压后将 `TouchPDF.app` 放到“应用程序”目录。
@@ -14,7 +34,7 @@ A lightweight macOS PDF reader and editor that turns your trackpad into a handwr
 
 ## 使用
 
-本地固定入口为项目根目录的 `启动 TouchPDF 稳定版.command`，双击后从 `release/TouchPDF/dist/TouchPDF.app` 启动新进程，避免复用仍在运行的旧程序。窗口标题与“关于 TouchPDF / 当前版本…”显示编译版本 `0.6.8 (15)`，关于窗口也显示实际运行路径。此入口是本地构建入口，本次尚未发布 GitHub。
+本地固定入口为项目根目录的 `启动 TouchPDF 稳定版.command`，双击后从 `dist/TouchPDF.app` 启动新进程，避免复用仍在运行的旧程序。窗口标题与“关于 TouchPDF / 当前版本…”显示编译版本 `0.6.9 (16)`，关于窗口也显示实际运行路径。此入口是本地构建入口，本次尚未发布 GitHub。
 
 发现其他 TouchPDF 进程时，会列出进程与路径，可请求它们正常退出，或取消本次启动。未保存文档仍由系统提示保存；不会强制终止进程。通过“TouchPDF → 退出所有 TouchPDF”可向所有同标识进程发出正常退出请求；若任何窗口取消保存或退出，该进程会继续运行。`⌘Q` 退出当前应用，关闭最后一个文档后也会退出；启动选择文件时直接取消则退出。
 
