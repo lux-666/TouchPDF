@@ -3,7 +3,7 @@ import PDFKit
 import UniformTypeIdentifiers
 
 // Compiled into the executable: replacing an app bundle cannot relabel a running process.
-let touchPDFBuild = "0.6.11 (18)"
+let touchPDFBuild = "0.6.12 (19)"
 
 let pdfType = "com.adobe.pdf"
 let defaultInkColor = NSColor(calibratedRed: 0.16, green: 0.37, blue: 0.70, alpha: 1)
@@ -435,8 +435,6 @@ final class DrawingWindow: NSWindow {
                event.modifierFlags.intersection([.command, .control, .option, .shift, .function]).isEmpty,
                let controller = windowController as? ReaderWindowController {
                 switch event.charactersIgnoringModifiers?.lowercased() {
-                case "b": controller.choosePen(); return
-                case "e": controller.chooseEraser(); return
                 case "[": controller.adjustRegionSize(by: -0.1); return
                 case "]": controller.adjustRegionSize(by: 0.1); return
                 case "c": controller.centerWritingRegion(); return
@@ -924,21 +922,39 @@ final class InkSurface: NSView {
         extendStroke(to: pdfView.convert(pdfView.convert(mapped.viewLocation, from: self), to: page))
     }
 
+    private let eraserRadius: CGFloat = 10
+
+    private func erasureTargets(at location: NSPoint) -> (annotations: [(PDFPage, PDFAnnotation)], canvas: [CanvasInk]) {
+        guard let pdfView else { return ([], []) }
+        let pdfLocation = pdfView.convert(location, from: self)
+        let radius = eraserRadius / max(pdfView.scaleFactor, 0.1)
+        var annotations = [(PDFPage, PDFAnnotation)]()
+        for target in pdfView.visiblePages {
+            let point = pdfView.convert(pdfLocation, to: target)
+            // Only the visible, page-clipped portion of a stroke is erasable.
+            let crop = target.bounds(for: pdfView.displayBox)
+            guard crop.insetBy(dx: -radius, dy: -radius).contains(point) else { continue }
+            for annotation in target.annotations where annotation.shouldDisplay && inkIsNear(annotation, point: point, radius: radius) {
+                annotations.append((target, annotation))
+            }
+        }
+        let canvas = (reader?.canvasInk ?? []).filter { ink in
+            let point = pdfView.convert(pdfLocation, to: ink.anchor)
+            return ink.points.count == 1 ? hypot(point.x - ink.points[0].x, point.y - ink.points[0].y) <= radius
+                : zip(ink.points, ink.points.dropFirst()).contains { distanceToSegment(point, $0.0, $0.1) <= radius }
+        }
+        return (annotations, canvas)
+    }
+
     private func extendStroke(to point: NSPoint) {
         guard let pdfView, let page else { return }
         if erasing {
-            let location = pdfView.convert(point, from: page)
-            if let target = pdfView.page(for: location, nearest: false) {
-                let targetPoint = pdfView.convert(location, to: target)
-                if let annotation = target.annotations.reversed().first(where: { inkIsNear($0, point: targetPoint, radius: 10 / max(pdfView.scaleFactor, 0.1)) }),
-                   !pendingErasure.contains(where: { $0.1 === annotation }) { pendingErasure.append((target, annotation)) }
+            let targets = erasureTargets(at: convert(pdfView.convert(point, from: page), from: pdfView))
+            for target in targets.annotations where !pendingErasure.contains(where: { $0.1 === target.1 }) {
+                pendingErasure.append(target)
             }
-            for ink in reader?.canvasInk ?? [] {
-                let p = pdfView.convert(location, to: ink.anchor)
-                let radius = 10 / max(pdfView.scaleFactor, 0.1)
-                let hit = ink.points.count == 1 ? hypot(p.x - ink.points[0].x, p.y - ink.points[0].y) <= radius
-                    : zip(ink.points, ink.points.dropFirst()).contains { distanceToSegment(p, $0.0, $0.1) <= radius }
-                if hit && !pendingCanvasErasure.contains(where: { $0 === ink }) { pendingCanvasErasure.append(ink) }
+            for ink in targets.canvas where !pendingCanvasErasure.contains(where: { $0 === ink }) {
+                pendingCanvasErasure.append(ink)
             }
         }
         if points.last.map({ hypot($0.x - point.x, $0.y - point.y) * pdfView.scaleFactor > 0.08 }) ?? true { points.append(point) }
@@ -1020,14 +1036,72 @@ final class InkSurface: NSView {
             inkColor.setStroke()
             path.stroke()
         }
-        if let location = penViewPosition {
+        if enabled, erasing, let location = penViewPosition {
+            drawErasureFeedback(at: location)
+        } else if let location = penViewPosition {
             let drawing = page != nil
             let radius: CGFloat = drawing ? 3 : 6
             let tip = NSBezierPath(ovalIn: NSRect(x: location.x - radius, y: location.y - radius, width: radius * 2, height: radius * 2))
-            (erasing ? NSColor.systemBlue : inkColor).set()
+            inkColor.set()
             tip.lineWidth = 1.5
             if drawing { tip.fill() } else { tip.stroke() }
         }
+    }
+
+    private func drawErasureFeedback(at location: NSPoint) {
+        guard let pdfView else { return }
+        let hovering = erasureTargets(at: location)
+        let active = page != nil
+        let tint = active ? NSColor.systemRed : NSColor.systemOrange
+        let annotations = active ? pendingErasure : hovering.annotations
+        let canvas = active ? pendingCanvasErasure : hovering.canvas
+        let count = annotations.count + canvas.count
+        func halo(_ path: NSBezierPath, width: CGFloat) {
+            path.lineWidth = width + 6
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            tint.withAlphaComponent(0.28).setStroke()
+            path.stroke()
+            path.lineWidth = width + 1
+            tint.withAlphaComponent(0.9).setStroke()
+            path.stroke()
+        }
+        for (target, annotation) in annotations {
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: convert(pdfView.convert(target.bounds(for: pdfView.displayBox), from: target), from: pdfView)).addClip()
+            let origin = convert(pdfView.convert(annotation.bounds.origin, from: target), from: pdfView)
+            let x = convert(pdfView.convert(NSPoint(x: annotation.bounds.minX + 1, y: annotation.bounds.minY), from: target), from: pdfView)
+            let y = convert(pdfView.convert(NSPoint(x: annotation.bounds.minX, y: annotation.bounds.minY + 1), from: target), from: pdfView)
+            let transform = AffineTransform(m11: x.x - origin.x, m12: x.y - origin.y,
+                                            m21: y.x - origin.x, m22: y.y - origin.y,
+                                            tX: origin.x, tY: origin.y)
+            for original in annotation.paths ?? [] {
+                let path = original.copy() as! NSBezierPath
+                path.transform(using: transform)
+                halo(path, width: (annotation.border?.lineWidth ?? inkWidth) * pdfView.scaleFactor)
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        for ink in canvas {
+            halo(inkPath(ink.points.map { convert(pdfView.convert($0, from: ink.anchor), from: pdfView) }), width: inkWidth * pdfView.scaleFactor)
+        }
+        let ring = NSBezierPath(ovalIn: NSRect(x: location.x - eraserRadius, y: location.y - eraserRadius,
+                                               width: eraserRadius * 2, height: eraserRadius * 2))
+        NSColor.white.withAlphaComponent(0.7).setFill()
+        ring.fill()
+        (count > 0 ? tint : NSColor.secondaryLabelColor).setStroke()
+        ring.lineWidth = 1.5
+        if !active { ring.setLineDash([3, 2], count: 2, phase: 0) }
+        ring.stroke()
+        let message = count == 0 ? "橡皮 · 未命中" : (active ? "待擦 \(count) 笔 · 收笔生效" : "预览 \(count) 笔 · 整笔擦除")
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.labelColor]
+        let size = (message as NSString).size(withAttributes: attributes)
+        let label = NSRect(x: min(max(bounds.minX + 4, location.x + 16), bounds.maxX - size.width - 16),
+                           y: min(max(bounds.minY + 4, location.y + 16), bounds.maxY - size.height - 12),
+                           width: size.width + 12, height: size.height + 8)
+        NSColor.windowBackgroundColor.withAlphaComponent(0.96).setFill()
+        NSBezierPath(roundedRect: label, xRadius: 5, yRadius: 5).fill()
+        (message as NSString).draw(at: NSPoint(x: label.minX + 6, y: label.minY + 4), withAttributes: attributes)
     }
 
     func isNativeNavigation(_ event: NSEvent) -> Bool {
@@ -1140,8 +1214,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSPopo
         annotationButton.bezelStyle = .rounded
         annotationButton.target = self
         annotationButton.action = #selector(toggleAnnotation)
-        annotationButton.toolTip = "单独按 Shift 切换。B 选笔，E 选橡皮。开启后轻触定位、加力落笔，无需点击；双指滚动、捏合缩放、三指移框。Esc 返回阅读。"
-        toolControl.toolTip = "点击或 X 切换画笔 / 橡皮，不改变批注开关；B 选笔、E 选橡皮并开始批注。"
+        annotationButton.toolTip = "单独按 Shift 开关批注，X 切换画笔 / 橡皮。开启后轻触定位、加力落笔，无需点击；双指滚动、捏合缩放、三指移框。Esc 返回阅读。"
+        toolControl.toolTip = "点击或 X 切换画笔 / 橡皮，不改变批注开关。Shift 开关批注，Esc 返回阅读。"
         toolControl.bezelStyle = .rounded
         toolControl.imagePosition = .imageLeading
         toolControl.target = self
@@ -1167,10 +1241,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSPopo
             return line
         }
         let bar = NSStackView(views: [
-            iconButton("打开", "folder", "打开 PDF · ⌘O", #selector(openPDF)),
+            iconButton("打开 ⌘O", "folder", "打开 PDF · ⌘O", #selector(openPDF)),
             iconButton("", "plus", "新建空白 · ⌘N", #selector(newBlank)),
-            iconButton("保存", "square.and.arrow.down", "保存 · ⌘S / 另存为 ⇧⌘S", #selector(savePDF)),
-            iconButton("", "arrow.uturn.backward", "撤销 · ⌘Z", #selector(undoStroke)), divider(),
+            iconButton("保存 ⌘S", "square.and.arrow.down", "保存 · ⌘S / 另存为 ⇧⌘S", #selector(savePDF)),
+            iconButton("⌘Z", "arrow.uturn.backward", "撤销 · ⌘Z", #selector(undoStroke)), divider(),
             layoutControl, divider(),
             iconButton("", "minus", "缩小 PDF", #selector(zoomOut)),
             iconButton("", "plus.magnifyingglass", "放大 PDF", #selector(zoomIn)),
@@ -1228,14 +1302,14 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSPopo
         colorChoice.setAccessibilityLabel("常用笔颜色")
         syncColorChoice()
         NSColorPanel.shared.showsAlpha = false
-        let centerButton = iconButton("", "scope", "书写框居中 · C；阅读模式仅预览", #selector(centerWritingRegion))
+        let centerButton = iconButton("居中 C", "scope", "书写框居中 · C；阅读模式仅预览", #selector(centerWritingRegion))
         fillButton.bezelStyle = .rounded
         fillButton.setButtonType(.pushOnPushOff)
         fillButton.target = self
         fillButton.action = #selector(toggleFillViewport)
         fillButton.toolTip = "将触控板映射到整个可见阅读区；再次点击恢复等比例书写框。铺满时横纵映射比例可能不同。"
         let settingsButton = iconButton("笔设置", "slider.horizontal.3", "力度、落笔方式与平滑设置", #selector(showPenSettings(_:)))
-        let regionBar = NSStackView(views: [annotationButton, toolControl, colorChoice, colorWell, divider(), NSTextField(labelWithString: "书写区"), regionSlider, regionSizeLabel, centerButton, fillButton, settingsButton])
+        let regionBar = NSStackView(views: [annotationButton, toolControl, colorChoice, colorWell, divider(), NSTextField(labelWithString: "书写区 [ ]"), regionSlider, regionSizeLabel, centerButton, fillButton, settingsButton])
         regionBar.orientation = .horizontal
         regionBar.spacing = 8
         regionBar.alignment = .centerY
@@ -1321,7 +1395,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSPopo
         annotationButton.image = NSImage(systemSymbolName: surface.enabled ? "pause.fill" : "hand.draw", accessibilityDescription: nil)
         annotationButton.imagePosition = .imageLeading
         toolControl.isEnabled = true
-        toolControl.title = surface.erasing ? "橡皮" : "画笔"
+        toolControl.title = surface.erasing ? "橡皮 X" : "画笔 X"
         toolControl.image = NSImage(systemSymbolName: surface.erasing ? "eraser" : "pencil.tip", accessibilityDescription: nil)
         toolControl.setAccessibilityLabel(surface.erasing ? "当前橡皮，点击切换画笔" : "当前画笔，点击切换橡皮")
         fillButton.state = surface.fillsViewport ? .on : .off
@@ -1339,7 +1413,11 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSPopo
         regionSlider.doubleValue = Double(surface.regionScale * 100)
         regionSizeLabel.stringValue = surface.fillsViewport ? "铺满" : "\(Int(surface.regionScale * 100))%"
         let releaseHint = surface.releaseToPreview ? "减力收笔" : "抬手收笔"
-        status.stringValue = surface.enabled ? (surface.cursorHoldFailed ? "未能固定系统指针，请全部抬手后重试。" : (surface.inputNotice ?? (surface.pressureMode ? "加力落笔 · \(releaseHint) · Shift 暂停调工具 · B 笔 / E 橡皮" : "单指书写 · ⌘ 预览 · Shift 暂停调工具 · B 笔 / E 橡皮"))) : "阅读 / 调整工具 · Shift 开始批注 · [ ] 框大小 · 1–5 颜色"
+        status.stringValue = surface.enabled ? (surface.cursorHoldFailed ? "未能固定系统指针，请全部抬手后重试。" : (surface.inputNotice ?? (surface.pressureMode ? "加力落笔 · \(releaseHint) · Shift 暂停调工具 · X 换工具" : "单指书写 · ⌘ 预览 · Shift 暂停调工具 · X 换工具"))) : "阅读 / 调整工具 · Shift 批注 · X 换工具 · [ ] 框大小 · C 居中 · 1–5 颜色"
+        if surface.enabled && surface.erasing && !surface.cursorHoldFailed && surface.inputNotice == nil {
+            let action = surface.pressureMode ? "轻触预览 · 加力擦除" : "触摸擦除 · ⌘ 预览"
+            status.stringValue = "橡皮 · \(action) · 整笔擦除 · X 换笔 · Shift 暂停 · ⌘Z 撤销"
+        }
         if let page = pdfView.currentPage, let document = pdfView.document {
             pageLabel.stringValue = "\(document.index(for: page) + 1) / \(document.pageCount) · \(Int(pdfView.scaleFactor * 100))%"
         }
@@ -1349,15 +1427,6 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSPopo
     @objc func savePDF() { surface.finishStroke(); reader?.save(nil) }
     @objc func toggleAnnotation() { surface.enabled.toggle(); window?.makeFirstResponder(surface.enabled ? surface : pdfView) }
     @objc func selectTool() { surface.finishStroke(); surface.erasing.toggle(); updateControls() }
-    @objc func choosePen() { chooseTool(erasing: false) }
-    @objc func chooseEraser() { chooseTool(erasing: true) }
-    private func chooseTool(erasing: Bool) {
-        surface.finishStroke() // Commit with the old tool before changing its meaning.
-        surface.erasing = erasing
-        if !surface.enabled { surface.enabled = true }
-        window?.makeFirstResponder(surface)
-        updateControls()
-    }
     @objc func selectLayout() {
         surface.interruptForNavigation()
         pdfView.displayMode = layoutControl.selectedSegment == 1 ? .twoUpContinuous : .singlePageContinuous
@@ -1446,7 +1515,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSPopo
         surface.suspendRawInput()
         let alert = NSAlert()
         alert.messageText = "触控板与键盘操作"
-        alert.informativeText = "Shift（单按松开）：开关批注\nEsc：返回阅读\nB / E：选笔 / 橡皮并开始批注\nX：切换当前工具，保持批注开关\n[ / ]：缩小 / 放大书写框\nC：书写框居中\n1–5：蓝、黑、红、绿、紫\n\n⌘O 打开 · ⌘N 新建 · ⌘S 保存\n⇧⌘S 另存为 · ⌘Z 撤销 · ⇧⌘Z 重做\n⌘W 关闭文档 · ⌘Q 退出\n\n先按 Shift 暂停，就能用触控板调整工具栏；调整后再按 Shift 继续。颜色、框大小和居中不会开启批注。\n双指滚动 · 捏合缩放 · 三指移框\n输入框中不触发工具快捷键。"
+        alert.informativeText = "Shift（单按松开）：开关批注\nEsc：返回阅读\nX：切换当前工具，保持批注开关\n[ / ]：缩小 / 放大书写框\nC：书写框居中\n1–5：蓝、黑、红、绿、紫\n\n⌘O 打开 · ⌘N 新建 · ⌘S 保存\n⇧⌘S 另存为 · ⌘Z 撤销 · ⇧⌘Z 重做\n⌘W 关闭文档 · ⌘Q 退出\n\n先按 Shift 暂停，就能用触控板调整工具栏；调整后再按 Shift 继续。颜色、框大小和居中不会开启批注。\n双指滚动 · 捏合缩放 · 三指移框\n橡皮：虚线圈定位，橙色预览；加力后红色标出待擦笔画，收笔生效。整笔擦除，⌘Z 可撤销。\n输入框中不触发工具快捷键。"
         alert.addButton(withTitle: "知道了")
         alert.runModal()
         surface.configureRawInput()
@@ -1680,9 +1749,8 @@ func makeMenu() {
     let drawing = NSMenu(title: "批注")
     // Shift alone is a modifier event, handled by DrawingWindow rather than a menu equivalent.
     drawing.addItem(withTitle: "切换触控板批注（Shift）", action: #selector(ReaderWindowController.toggleAnnotation), keyEquivalent: "")
-    drawing.addItem(withTitle: "笔（B）", action: #selector(ReaderWindowController.choosePen), keyEquivalent: "")
-    drawing.addItem(withTitle: "橡皮（E）", action: #selector(ReaderWindowController.chooseEraser), keyEquivalent: "")
-    drawing.addItem(withTitle: "书写框居中", action: #selector(ReaderWindowController.centerWritingRegion), keyEquivalent: "")
+    drawing.addItem(withTitle: "切换画笔 / 橡皮（X）", action: #selector(ReaderWindowController.selectTool), keyEquivalent: "")
+    drawing.addItem(withTitle: "书写框居中（C）", action: #selector(ReaderWindowController.centerWritingRegion), keyEquivalent: "")
     toolsItem.submenu = drawing
     menu.addItem(toolsItem)
     let helpItem = NSMenuItem()
@@ -1695,6 +1763,74 @@ func makeMenu() {
 }
 
 extension InkSurface {
+    static func checkEraserFeedback() {
+        let document = TouchPDFDocument()
+        document.undoManager?.groupsByEvent = false
+        let controller = ReaderWindowController(reader: document)
+        document.addWindowController(controller)
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        let surface = controller.surface, viewer = controller.pdfView
+        let page = document.pdf.page(at: 0)!
+        viewer.autoScales = false
+        viewer.scaleFactor = 1
+        viewer.layoutDocumentView()
+        for offset: CGFloat in [-3, 3] {
+            page.addAnnotation(inkAnnotation(points: [NSPoint(x: 90, y: 400 + offset), NSPoint(x: 170, y: 400 + offset)], page: page))
+        }
+        let outside = CanvasInk(anchor: page, points: [NSPoint(x: -25, y: 390), NSPoint(x: -25, y: 420)], color: .blue)
+        document.canvasInk.append(outside)
+        surface.pressureMode = true
+        surface.enabled = true
+        surface.erasing = true
+        surface.testRegion(NSRect(x: 80, y: 380, width: 100, height: 40), on: page)
+        let contact = TouchContact(identity: "eraser-feedback" as NSString, position: NSPoint(x: 0.5, y: 0.5))
+        surface.processContacts([contact], pressure: 0)
+        let preview = surface.erasureTargets(at: surface.penViewPosition!)
+        precondition(preview.annotations.count == 2 && surface.pendingErasure.isEmpty && page.annotations.count == 2,
+                     "hover must identify overlapping strokes without erasing them")
+        func feedbackPixels() -> Int {
+            let width = Int(surface.bounds.width), height = Int(surface.bounds.height)
+            let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            context.setFillColor(NSColor.white.cgColor)
+            context.fill(surface.bounds)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            surface.drawErasureFeedback(at: surface.penViewPosition!)
+            NSGraphicsContext.restoreGraphicsState()
+            let bytes = context.data!.assumingMemoryBound(to: UInt8.self)
+            return (0..<(width * height)).filter { bytes[$0 * 4] > 150 && Int(bytes[$0 * 4]) > Int(bytes[$0 * 4 + 2]) + 60 }.count
+        }
+        precondition(feedbackPixels() > 150, "hover highlight was not visibly drawn")
+        surface.processContacts([contact], pressure: 60)
+        precondition(surface.pendingErasure.count == preview.annotations.count && page.annotations.count == 2,
+                     "preview and pending erase selection disagree")
+        precondition(feedbackPixels() > 150, "pending erase highlight was not visibly drawn")
+        surface.processContacts([])
+        precondition(page.annotations.isEmpty && surface.pendingErasure.isEmpty)
+        document.undoManager?.undo()
+        precondition(page.annotations.count == 2, "one undo did not restore all highlighted strokes")
+        for scale: CGFloat in [0.6, 2] {
+            viewer.scaleFactor = scale
+            viewer.layoutDocumentView()
+            let hit = surface.convert(viewer.convert(NSPoint(x: 130, y: 400), from: page), from: viewer)
+            precondition(surface.erasureTargets(at: hit).annotations.count == 2, "zoom changed preview hit mapping")
+        }
+        viewer.scaleFactor = 1
+        viewer.layoutDocumentView()
+        surface.testRegion(NSRect(x: -35, y: 390, width: 20, height: 30), on: page)
+        surface.processContacts([contact], pressure: 0)
+        precondition(surface.erasureTargets(at: surface.penViewPosition!).canvas.count == 1 && document.canvasInk.count == 1)
+        surface.processContacts([contact], pressure: 60)
+        precondition(surface.pendingCanvasErasure.count == 1)
+        surface.processContacts([])
+        precondition(document.canvasInk.isEmpty)
+        document.undoManager?.undo()
+        precondition(document.canvasInk.count == 1)
+        surface.enabled = false
+        document.removeWindowController(controller)
+        print("PASS: eraser hover and pending highlights rendered, overlapping strokes, preview/commit agreement, zoom, outside ink, grouped undo")
+    }
     func checkFullViewportMapping() {
         precondition(fillsViewport)
         precondition(regionViewRect == bounds.insetBy(dx: 2, dy: 2), "full frame left unused space")
@@ -1715,14 +1851,15 @@ extension InkSurface {
         }
         let initialCount = count()
         let contact = TouchContact(identity: "shortcut" as NSString, position: NSPoint(x: 0.5, y: 0.5))
-        controller.choosePen()
+        if erasing { controller.selectTool() }
+        if !enabled { controller.toggleAnnotation() }
         processContacts([contact])
         precondition(!points.isEmpty, "shortcut test did not start a stroke")
-        controller.chooseEraser()
+        controller.selectTool()
         precondition(count() == initialCount + 1, "switching to eraser discarded unfinished ink")
         processContacts([])
         processContacts([contact])
-        controller.choosePen()
+        controller.selectTool()
         precondition(count() == initialCount, "switching to pen lost pending erasure")
         processContacts([])
     }
@@ -2298,9 +2435,9 @@ func checkShiftShortcuts() {
     controller.window?.contentView?.layoutSubtreeIfNeeded()
     controller.surface.pressureMode = false
     controller.surface.checkToolChangeDuringStroke(controller)
-    controller.chooseEraser()
+    controller.selectTool()
     precondition(controller.surface.enabled && controller.surface.erasing)
-    controller.choosePen()
+    controller.selectTool()
     precondition(controller.surface.enabled && !controller.surface.erasing)
     controller.toggleAnnotation()
     precondition(!controller.surface.enabled)
@@ -2312,6 +2449,7 @@ func checkShiftShortcuts() {
 }
 
 func selfTest(outputURL: URL? = nil) throws {
+    InkSurface.checkEraserFeedback()
     try ReaderWindowController.checkRetinaInkExport()
     ReaderWindowController.checkPausedSettings()
     checkShiftShortcuts()
