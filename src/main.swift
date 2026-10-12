@@ -3,7 +3,7 @@ import PDFKit
 import UniformTypeIdentifiers
 
 // Compiled into the executable: replacing an app bundle cannot relabel a running process.
-let touchPDFBuild = "0.6.9 (16)"
+let touchPDFBuild = "0.6.10 (17)"
 
 let pdfType = "com.adobe.pdf"
 let defaultInkColor = NSColor(calibratedRed: 0.16, green: 0.37, blue: 0.70, alpha: 1)
@@ -399,6 +399,11 @@ final class DrawingWindow: NSWindow {
                 switch event.charactersIgnoringModifiers?.lowercased() {
                 case "b": controller.choosePen(); return
                 case "e": controller.chooseEraser(); return
+                case "[": controller.adjustRegionSize(by: -0.1); return
+                case "]": controller.adjustRegionSize(by: 0.1); return
+                case "c": controller.centerWritingRegion(); return
+                case "1", "2", "3", "4", "5":
+                    controller.selectPaletteColor(Int(event.charactersIgnoringModifiers!)! - 1); return
                 default: break
                 }
             }
@@ -429,8 +434,10 @@ final class InkSurface: NSView {
     weak var reader: TouchPDFDocument?
     weak var pdfView: PDFView?
     var updateStatus: (() -> Void)?
+    var previewsRegion = false { didSet { needsDisplay = true } }
     var enabled = false {
         didSet {
+            previewsRegion = false
             resetInput()
             if enabled { ensureRegion() }
             configureRawInput()
@@ -926,7 +933,7 @@ final class InkSurface: NSView {
             ink.color.setStroke()
             path.stroke()
         }
-        if enabled, let rect = regionViewRect {
+        if enabled || previewsRegion, let rect = regionViewRect {
             NSColor.systemBlue.withAlphaComponent(0.025).setFill()
             NSBezierPath(rect: rect).fill()
             let outline = NSBezierPath(rect: rect)
@@ -934,7 +941,7 @@ final class InkSurface: NSView {
             outline.setLineDash([5, 4], count: 2, phase: 0)
             NSColor.systemBlue.withAlphaComponent(0.7).setStroke()
             outline.stroke()
-            ("触控板书写覆盖层" as NSString).draw(at: NSPoint(x: rect.minX + 6, y: rect.maxY + 5), withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemBlue])
+            ((enabled ? "触控板书写区域" : "书写框预览 · Shift 开始批注") as NSString).draw(at: NSPoint(x: rect.minX + 6, y: rect.maxY + 5), withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemBlue])
         }
         if let page, !points.isEmpty, !erasing {
             let path = inkPath(inkGeometry(points, smoothing: smoothInk).map { convert(pdfView.convert($0, from: page), from: pdfView) })
@@ -1008,7 +1015,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
     let pdfView = PDFView()
     let surface = InkSurface(frame: .zero)
     private let annotationButton = NSButton(title: "触控板批注", target: nil, action: nil)
-    private let toolControl = NSSegmentedControl(labels: ["笔", "橡皮"], trackingMode: .selectOne, target: nil, action: nil)
+    private let toolControl = NSSegmentedControl(labels: ["笔 B", "橡皮 E"], trackingMode: .selectOne, target: nil, action: nil)
     private let layoutControl = NSSegmentedControl(labels: ["单栏", "双栏"], trackingMode: .selectOne, target: nil, action: nil)
     private let regionSlider = NSSlider(value: 100, minValue: 40, maxValue: 300, target: nil, action: nil)
     private let regionSizeLabel = NSTextField(labelWithString: "100%")
@@ -1031,7 +1038,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         self.reader = reader
         window.title = "TouchPDF"
-        window.minSize = NSSize(width: 810, height: 500)
+        window.minSize = NSSize(width: 940, height: 500)
         window.acceptsMouseMovedEvents = true
         window.surface = surface
         window.delegate = self
@@ -1060,6 +1067,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
         annotationButton.target = self
         annotationButton.action = #selector(toggleAnnotation)
         annotationButton.toolTip = "单独按 Shift 切换。B 选笔，E 选橡皮。开启后轻触定位、加力落笔，无需点击；双指滚动、捏合缩放、三指移框。Esc 返回阅读。"
+        toolControl.toolTip = "点击只选择工具，不改变批注开关；B / E 选择工具并开始批注。"
         toolControl.selectedSegment = 0
         toolControl.target = self
         toolControl.action = #selector(selectTool)
@@ -1068,7 +1076,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
         layoutControl.action = #selector(selectLayout)
         layoutControl.setAccessibilityLabel("PDF 阅读布局")
         layoutControl.toolTip = "单栏或双栏连续阅读；只改变页面排版，不改变书写框映射。"
-        let bar = NSStackView(views: [button("打开", #selector(openPDF)), button("新建空白", #selector(newBlank)), button("保存", #selector(savePDF)), annotationButton, toolControl, button("撤销", #selector(undoStroke)), NSTextField(labelWithString: "PDF"), layoutControl, button("−", #selector(zoomOut)), button("＋", #selector(zoomIn)), button("适合宽度", #selector(fitPage))])
+        let openButton = button("打开", #selector(openPDF))
+        openButton.toolTip = "打开 PDF · ⌘O"
+        let saveButton = button("保存", #selector(savePDF))
+        saveButton.toolTip = "保存 PDF · ⌘S（另存为 ⇧⌘S）"
+        let undoButton = button("撤销", #selector(undoStroke))
+        undoButton.toolTip = "撤销 · ⌘Z（重做 ⇧⌘Z）"
+        let bar = NSStackView(views: [openButton, button("新建空白", #selector(newBlank)), saveButton, undoButton, NSTextField(labelWithString: "阅读"), layoutControl, button("−", #selector(zoomOut)), button("＋", #selector(zoomIn)), button("适合宽度", #selector(fitPage)), button("快捷键 ?", #selector(showShortcuts))])
         bar.orientation = .horizontal
         bar.spacing = 8
         bar.alignment = .centerY
@@ -1076,8 +1090,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
         regionSlider.action = #selector(resizeWritingRegion)
         regionSlider.isContinuous = true
         regionSlider.setAccessibilityLabel("书写框大小")
-        regionSlider.toolTip = "40–300%，最大可扩展到当前视窗允许的范围。只改变书写框，不缩放 PDF 或已有笔迹。"
-        regionSlider.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        regionSlider.toolTip = "[ 缩小 / ] 放大，每次 10%。阅读模式也可调整。40–300%，最大可扩展到当前视窗允许的范围。只改变书写框，不缩放 PDF 或已有笔迹。"
+        regionSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
         regionSizeLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
         inkModeControl.selectedSegment = 1
         surface.pressureMode = true
@@ -1114,18 +1128,20 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
         colorWell.toolTip = "选择新笔画的颜色。已有笔画保留原颜色。"
         colorWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
         colorWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        colorChoice.addItems(withTitles: ["蓝色", "黑色", "红色", "绿色", "紫色", "自定…"])
+        colorChoice.addItems(withTitles: ["蓝色  1", "黑色  2", "红色  3", "绿色  4", "紫色  5", "自定…"])
         colorChoice.target = self
         colorChoice.action = #selector(chooseInkColor)
-        colorChoice.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        colorChoice.widthAnchor.constraint(equalToConstant: 96).isActive = true
         colorChoice.setAccessibilityLabel("常用笔颜色")
         syncColorChoice()
         NSColorPanel.shared.showsAlpha = false
-        let regionBar = NSStackView(views: [NSTextField(labelWithString: "书写框大小"), regionSlider, regionSizeLabel, button("书写框居中", #selector(centerWritingRegion)), NSTextField(labelWithString: "笔颜色"), colorChoice, colorWell, smoothButton])
+        let centerButton = button("居中 C", #selector(centerWritingRegion))
+        centerButton.toolTip = "书写框居中 · C；阅读模式仅预览，不启动批注。"
+        let regionBar = NSStackView(views: [annotationButton, toolControl, NSTextField(labelWithString: "书写框"), regionSlider, regionSizeLabel, centerButton, colorChoice, colorWell])
         regionBar.orientation = .horizontal
         regionBar.spacing = 10
         regionBar.alignment = .centerY
-        let inputBar = NSStackView(views: [NSTextField(labelWithString: "落笔方式"), inkModeControl, pressureSlider, pressureLabel, releaseButton])
+        let inputBar = NSStackView(views: [NSTextField(labelWithString: "落笔方式"), inkModeControl, pressureSlider, pressureLabel, releaseButton, smoothButton])
         inputBar.orientation = .horizontal
         inputBar.spacing = 10
         inputBar.alignment = .centerY
@@ -1176,24 +1192,24 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
     }
     private func updateControls() {
         annotationButton.state = surface.enabled ? .on : .off
-        annotationButton.title = surface.enabled ? "批注：开" : "触控板批注"
-        toolControl.isEnabled = surface.enabled
+        annotationButton.title = surface.enabled ? "批注中 · Shift 暂停" : "触控板批注 · Shift"
+        toolControl.isEnabled = true
         toolControl.selectedSegment = surface.erasing ? 1 : 0
         layoutControl.selectedSegment = pdfView.displayMode == .twoUpContinuous || pdfView.displayMode == .twoUp ? 1 : 0
         layoutControl.isEnabled = true
-        inkModeControl.isEnabled = surface.enabled
+        inkModeControl.isEnabled = true
         inkModeControl.selectedSegment = surface.pressureMode ? 1 : 0
-        pressureSlider.isEnabled = surface.enabled && surface.pressureMode
+        pressureSlider.isEnabled = surface.pressureMode
         pressureSlider.doubleValue = Double(surface.pressureThreshold)
         pressureLabel.stringValue = "力度 \(Int(surface.pressureThreshold))"
-        releaseButton.isEnabled = surface.enabled && surface.pressureMode
+        releaseButton.isEnabled = surface.pressureMode
         releaseButton.state = surface.releaseToPreview ? .on : .off
         smoothButton.state = surface.smoothInk ? .on : .off
-        regionSlider.isEnabled = surface.enabled
+        regionSlider.isEnabled = true
         regionSlider.doubleValue = Double(surface.regionScale * 100)
         regionSizeLabel.stringValue = "\(Int(surface.regionScale * 100))%"
         let releaseHint = surface.releaseToPreview ? "减力收笔" : "抬手收笔"
-        status.stringValue = surface.enabled ? (surface.cursorHoldFailed ? "未能固定系统指针，请全部抬手后重试。" : (surface.inputNotice ?? (surface.pressureMode ? "轻触定位 · 加力落笔 · \(releaseHint) · 双指滚动/捏合缩放 · 三指移框 · 指针固定" : "单指写 · 双指滚动/捏合缩放 PDF · 三指移框 · 按住 ⌘ 预览 · 触控时指针固定"))) : "阅读模式 · Shift 开关批注 · B 笔 · E 橡皮"
+        status.stringValue = surface.enabled ? (surface.cursorHoldFailed ? "未能固定系统指针，请全部抬手后重试。" : (surface.inputNotice ?? (surface.pressureMode ? "加力落笔 · \(releaseHint) · Shift 暂停调工具 · B 笔 / E 橡皮" : "单指书写 · ⌘ 预览 · Shift 暂停调工具 · B 笔 / E 橡皮"))) : "阅读 / 调整工具 · Shift 开始批注 · [ ] 框大小 · 1–5 颜色"
         if let page = pdfView.currentPage, let document = pdfView.document {
             pageLabel.stringValue = "\(document.index(for: page) + 1) / \(document.pageCount) · \(Int(pdfView.scaleFactor * 100))%"
         }
@@ -1259,14 +1275,35 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate {
     }
     @objc func undoStroke() { surface.finishStroke(); reader?.undoManager?.undo() }
     @objc func centerWritingRegion() {
-        if !surface.enabled { surface.enabled = true }
         surface.centerRegion()
-        window?.makeFirstResponder(surface)
+        surface.previewsRegion = !surface.enabled
+        if surface.enabled { window?.makeFirstResponder(surface) }
     }
     override func windowTitle(forDocumentDisplayName displayName: String) -> String {
         "\(displayName) — TouchPDF \(touchPDFBuild)"
     }
-    @objc func resizeWritingRegion() { surface.regionScale = CGFloat(regionSlider.doubleValue / 100) }
+    @objc func resizeWritingRegion() {
+        surface.regionScale = CGFloat(regionSlider.doubleValue / 100)
+        surface.previewsRegion = !surface.enabled
+    }
+    func adjustRegionSize(by delta: CGFloat) {
+        regionSlider.doubleValue = Double(min(3, max(0.4, surface.regionScale + delta)) * 100)
+        resizeWritingRegion()
+    }
+    func selectPaletteColor(_ index: Int) {
+        guard inkPalette.indices.contains(index) else { return }
+        colorChoice.selectItem(at: index)
+        chooseInkColor()
+    }
+    @objc func showShortcuts() {
+        surface.suspendRawInput()
+        let alert = NSAlert()
+        alert.messageText = "触控板与键盘操作"
+        alert.informativeText = "Shift（单按松开）：开关批注\nEsc：返回阅读\nB / E：选笔 / 橡皮并开始批注\n[ / ]：缩小 / 放大书写框\nC：书写框居中\n1–5：蓝、黑、红、绿、紫\n\n⌘O 打开 · ⌘N 新建 · ⌘S 保存\n⇧⌘S 另存为 · ⌘Z 撤销 · ⇧⌘Z 重做\n⌘W 关闭文档 · ⌘Q 退出\n\n先按 Shift 暂停，就能用触控板调整工具栏；调整后再按 Shift 继续。颜色、框大小和居中不会开启批注。\n双指滚动 · 捏合缩放 · 三指移框\n输入框中不触发工具快捷键。"
+        alert.addButton(withTitle: "知道了")
+        alert.runModal()
+        surface.configureRawInput()
+    }
     @objc func zoomIn() { surface.interruptForNavigation(); pdfView.autoScales = false; pdfView.zoomIn(nil) }
     @objc func zoomOut() { surface.interruptForNavigation(); pdfView.autoScales = false; pdfView.zoomOut(nil) }
     @objc func fitPage() { surface.interruptForNavigation(); pdfView.autoScales = true; pdfView.scaleFactor = pdfView.scaleFactorForSizeToFit }
@@ -1983,6 +2020,42 @@ extension InkSurface {
 }
 
 extension ReaderWindowController {
+    static func checkPausedSettings() {
+        let defaults = UserDefaults.standard
+        let keys = ["inkColorRGB", "pressureThreshold", "releaseToPreview", "smoothInk"]
+        let saved = keys.map { defaults.object(forKey: $0) }
+        defer { for (key, value) in zip(keys, saved) {
+            if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+        } }
+        let document = TouchPDFDocument()
+        let controller = ReaderWindowController(reader: document)
+        document.addWindowController(controller)
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        precondition(!controller.surface.enabled && controller.regionSlider.isEnabled && controller.toolControl.isEnabled)
+        precondition(controller.inkModeControl.isEnabled && controller.pressureSlider.isEnabled && controller.releaseButton.isEnabled)
+        controller.toolControl.selectedSegment = 1
+        controller.selectTool()
+        controller.adjustRegionSize(by: 0.2)
+        controller.centerWritingRegion()
+        controller.selectPaletteColor(2)
+        controller.pressureSlider.doubleValue = 45
+        controller.changePressureThreshold()
+        precondition(!controller.surface.enabled && !controller.surface.wantsRawInput)
+        precondition(controller.surface.erasing && abs(controller.surface.regionScale - 1.2) < 0.001)
+        precondition(controller.surface.previewsRegion && controller.surface.pressureThreshold == 45)
+        precondition(controller.colorChoice.indexOfSelectedItem == 2)
+        controller.toggleAnnotation()
+        precondition(controller.surface.enabled && !controller.surface.previewsRegion && controller.surface.erasing)
+        precondition(abs(controller.surface.regionScale - 1.2) < 0.001 && controller.colorChoice.indexOfSelectedItem == 2)
+        controller.toggleAnnotation()
+        controller.inkModeControl.selectedSegment = 0
+        controller.selectInkMode()
+        precondition(!controller.pressureSlider.isEnabled && !controller.releaseButton.isEnabled)
+        precondition(controller.regionSlider.isEnabled && controller.toolControl.isEnabled)
+        precondition(!document.isDocumentEdited, "changing paused settings edited the PDF")
+        document.removeWindowController(controller)
+        print("PASS: paused toolbar settings, preview without input capture, resume preserves settings, PDF unchanged")
+    }
     static func checkImportedLayouts() throws {
         let source = samplePDF()
         // Include a portrait page with a nonzero crop origin, a landscape page,
@@ -2053,6 +2126,7 @@ func checkShiftShortcuts() {
 }
 
 func selfTest(outputURL: URL? = nil) throws {
+    ReaderWindowController.checkPausedSettings()
     checkShiftShortcuts()
     let surface = InkSurface(frame: NSRect(x: 0, y: 0, width: 612, height: 792))
     precondition(!surface.requiresPress, "default handwriting must not require a click")
