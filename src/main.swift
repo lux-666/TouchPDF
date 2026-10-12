@@ -3,7 +3,7 @@ import PDFKit
 import UniformTypeIdentifiers
 
 // Compiled into the executable: replacing an app bundle cannot relabel a running process.
-let touchPDFBuild = "0.6.12 (19)"
+let touchPDFBuild = "0.6.13 (20)"
 
 let pdfType = "com.adobe.pdf"
 let defaultInkColor = NSColor(calibratedRed: 0.16, green: 0.37, blue: 0.70, alpha: 1)
@@ -1093,15 +1093,7 @@ final class InkSurface: NSView {
         ring.lineWidth = 1.5
         if !active { ring.setLineDash([3, 2], count: 2, phase: 0) }
         ring.stroke()
-        let message = count == 0 ? "橡皮 · 未命中" : (active ? "待擦 \(count) 笔 · 收笔生效" : "预览 \(count) 笔 · 整笔擦除")
-        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.labelColor]
-        let size = (message as NSString).size(withAttributes: attributes)
-        let label = NSRect(x: min(max(bounds.minX + 4, location.x + 16), bounds.maxX - size.width - 16),
-                           y: min(max(bounds.minY + 4, location.y + 16), bounds.maxY - size.height - 12),
-                           width: size.width + 12, height: size.height + 8)
-        NSColor.windowBackgroundColor.withAlphaComponent(0.96).setFill()
-        NSBezierPath(roundedRect: label, xRadius: 5, yRadius: 5).fill()
-        (message as NSString).draw(at: NSPoint(x: label.minX + 6, y: label.minY + 4), withAttributes: attributes)
+
     }
 
     func isNativeNavigation(_ event: NSEvent) -> Bool {
